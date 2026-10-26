@@ -1,746 +1,1231 @@
-```html
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>エリア・スキャナー 限界精度オンライン</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-    <style>
-        body { margin: 0; padding: 0; overflow: hidden; background-color: #000; color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        #map { width: 100vw; height: 100vh; z-index: 1; background: #000; }
-        
-        #ui-layer { position: absolute; inset: 0; z-index: 10; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; }
-        .pointer-events-auto { pointer-events: auto; }
-        .glass-panel { background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.2); }
-        
-        /* プレイヤーのマーカー */
-        .player-marker {
-            width: 16px; height: 16px; border-radius: 50%; position: relative;
-            box-shadow: 0 0 15px currentColor; border: 2px solid white;
-            transition: all 0.3s ease-out; z-index: 1000;
-        }
-        .player-marker::after {
-            content: ''; position: absolute; top: -10px; left: -10px; right: -10px; bottom: -10px;
-            border: 2px solid currentColor; border-radius: 50%;
-            animation: pulse 1s infinite;
-        }
-        /* 他プレイヤーのマーカー */
-        .other-player-marker {
-            width: 14px; height: 14px; border-radius: 50%; position: relative;
-            box-shadow: 0 0 8px currentColor; border: 2px dashed white;
-            transition: all 0.5s ease-out; z-index: 900; opacity: 0.8;
-        }
-
-        @keyframes pulse {
-            0% { transform: scale(0.5); opacity: 1; }
-            100% { transform: scale(2.5); opacity: 0; }
-        }
-
-        .grid-cell { stroke-width: 0; mix-blend-mode: multiply; }
-        ::-webkit-scrollbar { display: none; }
-        .hide-scroll { -ms-overflow-style: none; scrollbar-width: none; }
-        .timer-hurry { color: #ef4444; animation: blink 1s infinite; }
-        @keyframes blink { 50% { opacity: 0.5; } }
-        
-        /* 補正モード中の画面枠点滅 */
-        .calibrating { animation: border-pulse 1.5s infinite; border: 4px solid #FCD34D; }
-        @keyframes border-pulse { 50% { border-color: transparent; } }
-
-        /* ロビーのホバー効果 */
-        .room-item { transition: all 0.2s; }
-        .room-item:hover { background-color: #374151; cursor: pointer; border-color: #10B981; }
-    </style>
-</head>
-<body>
-
-<div id="map-container" class="absolute inset-0">
-    <div id="map"></div>
-</div>
-
-<!-- UIレイヤー (プレイ中) -->
-<div id="ui-layer" class="hidden">
-    <div class="p-3 w-full flex justify-between items-start gap-2">
-        <div class="flex flex-col gap-2">
-            <div class="glass-panel px-4 py-3 rounded-xl text-sm font-bold text-gray-200 border-l-4 border-l-green-500 shadow-lg pointer-events-auto min-w-[140px]">
-                📍 和泉市全域<br>
-                <div class="text-xs text-gray-400 mt-1">REMAINING TIME</div>
-                <div id="timer-display" class="text-3xl font-black text-white tracking-widest">--:--</div>
-            </div>
-        </div>
-
-        <div class="glass-panel p-3 rounded-xl pointer-events-auto w-48 max-h-48 overflow-y-auto hide-scroll" id="ranking-list">
-            <h3 class="text-[10px] text-gray-400 font-bold mb-2 tracking-widest text-center border-b border-gray-700 pb-1">50cm² BATTLE RANKING</h3>
-            <div id="ranking-container" class="flex flex-col gap-1">
-                <div class="text-center text-sm text-gray-500">Waiting...</div>
-            </div>
-        </div>
-    </div>
-
-    <div class="p-4 w-full flex flex-col items-center gap-3 pb-8">
-        <div id="status-message" class="glass-panel px-6 py-4 rounded-full text-sm font-bold text-white flex items-center gap-2 shadow-lg max-w-full text-center">
-            <div class="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div>
-            GPS信号を待機中...
-        </div>
-        
-        <!-- コントロールボタン群 -->
-        <div class="flex gap-2 pointer-events-auto w-full max-w-md">
-            <button id="btn-recenter" class="flex-1 bg-gray-900 hover:bg-gray-800 border border-gray-700 text-white py-3 rounded-xl font-bold shadow-lg transition-colors text-sm">
-                🎯 追従
-            </button>
-            <button id="btn-calibrate" class="flex-1 bg-yellow-900 hover:bg-yellow-800 border border-yellow-600 text-yellow-100 py-3 rounded-xl font-bold shadow-lg transition-colors text-sm">
-                🔧 ズレを直す
-            </button>
-        </div>
-    </div>
-</div>
-
-<!-- ロード画面 -->
-<div id="loading-screen" class="absolute inset-0 bg-gray-950 z-50 flex flex-col items-center justify-center transition-opacity duration-500">
-    <h1 class="text-5xl font-black mb-2 tracking-widest text-white drop-shadow-md text-center">AREA<br>SCANNER</h1>
-    <p id="loading-text" class="text-gray-400 animate-pulse mt-8">通信を確立中...</p>
-    <div class="w-12 h-12 border-4 border-green-500 border-t-transparent rounded-full animate-spin mt-4"></div>
-</div>
-
-<!-- ロビー画面 -->
-<div id="lobby-screen" class="absolute inset-0 bg-gray-900/95 backdrop-blur-sm z-40 flex flex-col items-center justify-center hidden">
-    <h2 class="text-4xl font-black text-white mb-6 tracking-widest text-center">LOBBY</h2>
-    <div class="bg-gray-800 p-6 rounded-2xl shadow-2xl w-full max-w-sm border border-gray-700 flex flex-col gap-4">
-        
-        <button id="btn-show-create" class="bg-green-600 hover:bg-green-500 text-white py-4 rounded-xl font-bold text-lg transition-colors shadow-lg border border-green-400 flex justify-center items-center gap-2">
-            <span>➕</span> 新規ルームを作成
-        </button>
-        
-        <div class="mt-2">
-            <h3 class="text-xs text-gray-400 font-bold mb-2 tracking-widest border-b border-gray-700 pb-1">参加可能なルーム一覧</h3>
-            <div id="room-list-container" class="bg-gray-900 rounded-xl border border-gray-700 h-48 overflow-y-auto p-2 flex flex-col gap-2 hide-scroll">
-                <div class="text-center text-gray-500 text-sm mt-4">ルームを検索中...</div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- モード選択(作成)画面 -->
-<div id="setup-screen" class="absolute inset-0 bg-gray-900/95 backdrop-blur-sm z-40 flex flex-col items-center justify-center hidden">
-    <div class="bg-gray-800 p-8 rounded-2xl shadow-2xl max-w-sm w-full border border-gray-700">
-        <h2 class="text-2xl font-black text-center text-white mb-2">新規ルーム作成</h2>
-        <p class="text-center text-gray-400 text-sm mb-6">ホストとして作戦時間を設定します</p>
-        
-        <div class="grid grid-cols-2 gap-3 mb-6">
-            <button class="mode-btn bg-gray-700 hover:bg-green-600 text-white py-4 rounded-xl font-bold text-xl transition-colors border border-gray-600 shadow-md" data-time="3">3分</button>
-            <button class="mode-btn bg-gray-700 hover:bg-green-600 text-white py-4 rounded-xl font-bold text-xl transition-colors border border-gray-600 shadow-md" data-time="5">5分</button>
-            <button class="mode-btn bg-gray-700 hover:bg-green-600 text-white py-4 rounded-xl font-bold text-xl transition-colors border border-gray-600 shadow-md" data-time="10">10分</button>
-            <button class="mode-btn bg-gray-700 hover:bg-blue-600 text-white py-4 rounded-xl font-bold text-lg transition-colors border border-gray-600 shadow-md" data-time="0">無制限</button>
-        </div>
-        <button id="btn-cancel-create" class="w-full text-gray-400 hover:text-white text-sm font-bold mt-2">← ロビーへ戻る</button>
-    </div>
-</div>
-
-<!-- 待機画面 -->
-<div id="waiting-screen" class="absolute inset-0 bg-gray-900/95 backdrop-blur-sm z-40 flex flex-col items-center justify-center hidden">
-    <div class="bg-gray-800 p-6 rounded-2xl shadow-2xl max-w-sm w-full border border-gray-700 flex flex-col items-center">
-        <h2 class="text-2xl font-black text-white mb-1">待機室</h2>
-        <p id="waiting-room-id" class="text-gray-400 text-sm mb-2 font-mono bg-black px-2 py-1 rounded">Room: -----</p>
-        <p id="waiting-rule" class="text-green-400 text-sm font-bold mb-4">作戦時間: -分</p>
-        
-        <div class="w-full bg-gray-900 rounded-xl p-3 flex flex-col gap-2 mb-6 min-h-[120px] max-h-[200px] overflow-y-auto border border-gray-700" id="waiting-players">
-            <!-- プレイヤーリスト -->
-        </div>
-        
-        <p id="waiting-status" class="text-yellow-400 text-sm font-bold mb-4 animate-pulse">ホストの開始を待っています...</p>
-        
-        <button id="btn-start-room" class="hidden w-full bg-red-600 hover:bg-red-500 text-white py-4 rounded-xl font-bold text-xl transition-colors shadow-lg border border-red-400">🚀 作戦開始 (ホスト専用)</button>
-    </div>
-</div>
-
-<!-- リザルト画面 -->
-<div id="result-screen" class="absolute inset-0 bg-black/90 backdrop-blur-md z-50 flex flex-col items-center justify-center hidden pointer-events-auto">
-    <h1 class="text-6xl font-black text-white mb-2 tracking-widest">TIME UP</h1>
-    <p class="text-xl text-green-400 font-bold mb-8">作戦終了</p>
-    <div class="glass-panel p-6 rounded-2xl w-full max-w-sm flex flex-col items-center mb-8">
-        <span class="text-gray-400 text-sm font-bold mb-2">あなたの制圧マス数 (1マス=50cm角)</span>
-        <div class="text-5xl font-black text-white mb-2"><span id="final-score">0</span><span class="text-lg text-gray-400 ml-1">マス</span></div>
-        <div id="final-rank" class="text-xl font-bold text-yellow-400">Rank: -</div>
-    </div>
-    <button id="btn-restart" class="bg-white text-black hover:bg-gray-200 px-10 py-4 rounded-full font-black text-xl transition-transform hover:scale-105 shadow-lg shadow-white/20">ロビーに戻る</button>
-</div>
-
-<script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-    import { getDatabase, ref, set, get, child, onChildAdded, onChildChanged, onValue, update, push, remove, onDisconnect, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-database.js";
-
-    // Firebaseの設定
-    const firebaseConfig = {
-        apiKey: "AIzaSyAfjTWeL71syzo7SNpym7ATcbrq6i7JfXQ",
-        authDomain: "game-server-df061.firebaseapp.com",
-        databaseURL: "https://game-server-df061-default-rtdb.firebaseio.com",
-        projectId: "game-server-df061",
-        storageBucket: "game-server-df061.firebasestorage.app",
-        messagingSenderId: "475396427934",
-        appId: "1:475396427934:web:5106a6210aa51e3b8f6b8f"
-    };
-
-    let app, auth, db;
-    let myUid = null;
-    let myRoomId = null;
-    let isHost = false;
-    let roomDuration = 0;
-
-    // --- ゲーム設定 ---
-    const CELL_SIZE = 0.000005; // 50cm四方
-    const COLORS = ['#3B82F6', '#EF4444', '#EAB308', '#22C55E', '#F97316', '#A855F7', '#06B6D4', '#EC4899'];
-    let myColor = '#FFFFFF';
-    
-    // 和泉市全域 座標設定
-    const CENTER_LAT = 34.465500;
-    const CENTER_LNG = 135.457500; 
-    const PLAY_AREA = { north: 34.525000, south: 34.325000, west: 135.410000, east: 135.535000 };
-
-    // 状態変数
-    let map = null;
-    let playerMarker = null;
-    let otherPlayerMarkers = {}; // { uid: L.marker }
-    let watchId = null;
-    let isPlaying = false;
-    let remainingSeconds = 0;
-    let timerInterval = null;
-    
-    // GPS補正用変数
-    let latOffset = 0, lngOffset = 0, rawLat = 0, rawLng = 0;
-    let isCalibrating = false; 
-    
-    const gridData = new Map();
-    let colorScores = {};
-
-    // UI要素
-    const ui = {
-        loading: document.getElementById('loading-screen'),
-        lobby: document.getElementById('lobby-screen'),
-        setup: document.getElementById('setup-screen'),
-        waiting: document.getElementById('waiting-screen'),
-        game: document.getElementById('ui-layer'),
-        result: document.getElementById('result-screen'),
-        status: document.getElementById('status-message'),
-        timer: document.getElementById('timer-display'),
-        ranking: document.getElementById('ranking-container'),
-        finalScore: document.getElementById('final-score'),
-        finalRank: document.getElementById('final-rank'),
-        mapContainer: document.getElementById('map-container'),
-        roomList: document.getElementById('room-list-container'),
-        waitingPlayers: document.getElementById('waiting-players'),
-        btnStartRoom: document.getElementById('btn-start-room')
-    };
-    const btns = {
-        recenter: document.getElementById('btn-recenter'),
-        calibrate: document.getElementById('btn-calibrate'),
-        restart: document.getElementById('btn-restart'),
-        showCreate: document.getElementById('btn-show-create'),
-        cancelCreate: document.getElementById('btn-cancel-create'),
-        modes: document.querySelectorAll('.mode-btn')
-    };
-
-    // --- 初期化 ---
-    async function initSystem() {
-        try {
-            app = initializeApp(firebaseConfig);
-            auth = getAuth(app);
-            db = getDatabase(app);
-            
-            onAuthStateChanged(auth, (user) => {
-                if (user && !isPlaying) {
-                    myUid = user.uid;
-                    showLobbyScreen();
-                }
-            });
-            await signInAnonymously(auth);
-        } catch (error) {
-            console.error("Firebase Connection Error:", error);
-            document.getElementById('loading-text').innerText = "接続エラー: リロードしてください";
-        }
+{
+  "folders": [
+    {
+      "id": "root",
+      "name": "すべてのノート",
+      "parentId": null
+    },
+    {
+      "id": "lelp9fr",
+      "name": "弱点ノート",
+      "parentId": "root"
+    },
+    {
+      "id": "r0jhzgq",
+      "name": "数学",
+      "parentId": "lelp9fr"
+    },
+    {
+      "id": "fu3rija",
+      "name": "一問一答",
+      "parentId": "root"
+    },
+    {
+      "id": "m6btl8a",
+      "name": "英語",
+      "parentId": "fu3rija"
+    },
+    {
+      "id": "yyq0c1h",
+      "name": "英語",
+      "parentId": "lelp9fr"
+    },
+    {
+      "id": "ft1mi6a",
+      "name": "国語",
+      "parentId": "fu3rija"
+    },
+    {
+      "id": "33s943a",
+      "name": "理科",
+      "parentId": "fu3rija"
+    },
+    {
+      "id": "nbfvyo3",
+      "name": "漢字",
+      "parentId": "ft1mi6a"
+    },
+    {
+      "id": "9ycd3fx",
+      "name": "読み",
+      "parentId": "nbfvyo3"
+    },
+    {
+      "id": "ta1kkgg",
+      "name": "漢文",
+      "parentId": "ft1mi6a"
+    },
+    {
+      "id": "m4ltwr2",
+      "name": "国語",
+      "parentId": "lelp9fr"
+    },
+    {
+      "id": "a6hpwq6",
+      "name": "教え",
+      "parentId": "r0jhzgq"
+    },
+    {
+      "id": "uxzn3cx",
+      "name": "図形",
+      "parentId": "a6hpwq6"
+    },
+    {
+      "id": "h863ywj",
+      "name": "社会",
+      "parentId": "fu3rija"
+    },
+    {
+      "id": "wg18ihs",
+      "name": "単語",
+      "parentId": "m6btl8a"
+    },
+    {
+      "id": "tm03wjn",
+      "name": "熟語",
+      "parentId": "m6btl8a"
+    },
+    {
+      "id": "vetvkg2",
+      "name": "教え",
+      "parentId": "yyq0c1h"
+    },
+    {
+      "id": "830ppvc",
+      "name": "日本語訳→英語",
+      "parentId": "vetvkg2"
+    },
+    {
+      "id": "ju23bw4",
+      "name": "文",
+      "parentId": "m6btl8a"
+    },
+    {
+      "id": "p7p8bcl",
+      "name": "下線部（代名詞）の意味書き",
+      "parentId": "vetvkg2"
+    },
+    {
+      "id": "4khh89w",
+      "name": "しっかりやるとこ",
+      "parentId": "yyq0c1h"
+    },
+    {
+      "id": "q9au6l1",
+      "name": "同じ意味で違う書き方",
+      "parentId": "m6btl8a"
+    },
+    {
+      "id": "bf9bc0d",
+      "name": "反対の意味",
+      "parentId": "m6btl8a"
+    },
+    {
+      "id": "jlnj3f9",
+      "name": "リスニング",
+      "parentId": "vetvkg2"
+    },
+    {
+      "id": "0g6fua1",
+      "name": "適語入れ",
+      "parentId": "vetvkg2"
+    },
+    {
+      "id": "69wrnh0",
+      "name": "歴史",
+      "parentId": "h863ywj"
+    },
+    {
+      "id": "vox26ah",
+      "name": "地理",
+      "parentId": "h863ywj"
+    },
+    {
+      "id": "m93hoy7",
+      "name": "公民",
+      "parentId": "h863ywj"
+    },
+    {
+      "id": "gz6ord3",
+      "name": "理社応用関連",
+      "parentId": "fu3rija"
+    },
+    {
+      "id": "dkyovfz",
+      "name": "社会",
+      "parentId": "gz6ord3"
+    },
+    {
+      "id": "fwxkhrx",
+      "name": "世界地理",
+      "parentId": "vox26ah"
+    },
+    {
+      "id": "0cvtkl1",
+      "name": "日本地理",
+      "parentId": "vox26ah"
+    },
+    {
+      "id": "g16e1qe",
+      "name": "世界歴史",
+      "parentId": "69wrnh0"
+    },
+    {
+      "id": "2pmshvs",
+      "name": "日本歴史",
+      "parentId": "69wrnh0"
+    },
+    {
+      "id": "ez0gsr1",
+      "name": "縄文〜古墳",
+      "parentId": "2pmshvs"
+    },
+    {
+      "id": "hyfvp3t",
+      "name": "飛鳥〜奈良",
+      "parentId": "2pmshvs"
+    },
+    {
+      "id": "jgt1iuf",
+      "name": "平安",
+      "parentId": "2pmshvs"
+    },
+    {
+      "id": "5vpoeaw",
+      "name": "鎌倉",
+      "parentId": "2pmshvs"
+    },
+    {
+      "id": "akwmrw9",
+      "name": "室町",
+      "parentId": "2pmshvs"
+    },
+    {
+      "id": "gpkyfgr",
+      "name": "江戸",
+      "parentId": "2pmshvs"
+    },
+    {
+      "id": "9cq72cd",
+      "name": "明治",
+      "parentId": "2pmshvs"
+    },
+    {
+      "id": "dkbi0ba",
+      "name": "大正〜現代",
+      "parentId": "2pmshvs"
+    },
+    {
+      "id": "nwtuqab",
+      "name": "年号",
+      "parentId": "69wrnh0"
+    },
+    {
+      "id": "ympe4in",
+      "name": "理科",
+      "parentId": "lelp9fr"
+    },
+    {
+      "id": "7jngsy9",
+      "name": "記述",
+      "parentId": "ympe4in"
+    },
+    {
+      "id": "qdi3z3u",
+      "name": "中1",
+      "parentId": "33s943a"
+    },
+    {
+      "id": "073t7tm",
+      "name": "中2",
+      "parentId": "33s943a"
+    },
+    {
+      "id": "bhw2pf2",
+      "name": "中3",
+      "parentId": "33s943a"
+    },
+    {
+      "id": "wcqza4q",
+      "name": "植物",
+      "parentId": "bhw2pf2"
+    },
+    {
+      "id": "ufexj0p",
+      "name": "物質の構成",
+      "parentId": "073t7tm"
+    },
+    {
+      "id": "rxj2cdy",
+      "name": "長文",
+      "parentId": "vetvkg2"
+    },
+    {
+      "id": "0hx3rw2",
+      "name": "空欄に入れる文",
+      "parentId": "rxj2cdy"
+    },
+    {
+      "id": "j6fi8et",
+      "name": "電流",
+      "parentId": "073t7tm"
+    },
+    {
+      "id": "55pi871",
+      "name": "同じ関係作り",
+      "parentId": "m6btl8a"
+    },
+    {
+      "id": "s02byqe",
+      "name": "計算",
+      "parentId": "a6hpwq6"
+    },
+    {
+      "id": "hhbm3ng",
+      "name": "置き字",
+      "parentId": "ta1kkgg"
+    },
+    {
+      "id": "rvcv0a3",
+      "name": "再読文字",
+      "parentId": "ta1kkgg"
+    },
+    {
+      "id": "ygi4chh",
+      "name": "漢文",
+      "parentId": "m4ltwr2"
+    },
+    {
+      "id": "y3017tx",
+      "name": "置き字",
+      "parentId": "ygi4chh"
+    },
+    {
+      "id": "0iyqili",
+      "name": "空間図形",
+      "parentId": "uxzn3cx"
+    },
+    {
+      "id": "9riugiz",
+      "name": "文法",
+      "parentId": "vetvkg2"
+    },
+    {
+      "id": "bjjffg7",
+      "name": "言い換え",
+      "parentId": "vetvkg2"
+    },
+    {
+      "id": "g1pnuvu",
+      "name": "関係代名詞",
+      "parentId": "9riugiz"
+    },
+    {
+      "id": "t0pgp2f",
+      "name": "読み替え的な",
+      "parentId": "m6btl8a"
     }
-
-    // --- ロビー機能 ---
-    function showLobbyScreen() {
-        ui.loading.classList.add('hidden');
-        ui.setup.classList.add('hidden');
-        ui.lobby.classList.remove('hidden');
-
-        // ルーム一覧の監視
-        onValue(ref(db, 'rooms'), (snap) => {
-            if(isPlaying || ui.lobby.classList.contains('hidden')) return;
-            ui.roomList.innerHTML = '';
-            const rooms = snap.val();
-            let count = 0;
-            
-            if (rooms) {
-                for (const roomId in rooms) {
-                    const room = rooms[roomId];
-                    if (room.status === "waiting") {
-                        count++;
-                        const pCount = room.players ? Object.keys(room.players).length : 0;
-                        const durationText = room.duration > 0 ? `${room.duration}分` : "無制限";
-                        
-                        const div = document.createElement('div');
-                        div.className = 'room-item bg-gray-800 p-3 rounded-lg border border-gray-600 flex justify-between items-center';
-                        div.innerHTML = `
-                            <div>
-                                <div class="text-white font-bold text-sm">Room: ${roomId.substring(0, 5).toUpperCase()}</div>
-                                <div class="text-gray-400 text-xs">時間: ${durationText} | 参加: ${pCount}人</div>
-                            </div>
-                            <div class="text-green-400 font-bold text-sm">参加 ➔</div>
-                        `;
-                        div.onclick = () => joinRoom(roomId);
-                        ui.roomList.appendChild(div);
-                    }
-                }
-            }
-            if (count === 0) {
-                ui.roomList.innerHTML = '<div class="text-center text-gray-500 text-sm mt-4">参加可能なルームがありません</div>';
-            }
-        });
+  ],
+  "memos": [
+    {
+      "id": "gtc9z2b",
+      "text": "大政翼賛会（基本こっちで！）≒翼賛会",
+      "count": 1,
+      "folderId": "h863ywj"
+    },
+    {
+      "id": "ifuxih9",
+      "text": "貯⭐︎蓄⭐︎",
+      "count": 1,
+      "folderId": "h863ywj"
+    },
+    {
+      "id": "5uurbnn",
+      "text": "言葉や火を使うようになった人類　原人",
+      "count": 1,
+      "folderId": "g16e1qe"
+    },
+    {
+      "id": "xhgvun2",
+      "text": "消費者行政をとりまとめる国の行政機関　消費者庁",
+      "count": 1,
+      "folderId": "m93hoy7"
+    },
+    {
+      "id": "2kaotqn",
+      "text": "公正（3つ）　結果、機会、手続き（の公正さ）",
+      "count": 1,
+      "folderId": "m93hoy7"
+    },
+    {
+      "id": "3ypk1bw",
+      "text": "労働条件改善を求める労働者と使用人の争い　労働争議",
+      "count": 1,
+      "folderId": "dkbi0ba"
+    },
+    {
+      "id": "llglyk8",
+      "text": "小作料減税を求める小作人と地主の争い　小作争議",
+      "count": 1,
+      "folderId": "dkbi0ba"
+    },
+    {
+      "id": "6gm1p1a",
+      "text": "女性の立場改善を求め、平塚らいてうとともに新婦人協会を設立　市川房枝",
+      "count": 1,
+      "folderId": "dkbi0ba"
+    },
+    {
+      "id": "xhjmrng",
+      "text": "化学式",
+      "count": 1,
+      "folderId": "073t7tm"
+    },
+    {
+      "id": "trxg4gy",
+      "text": "化学反応式",
+      "count": 1,
+      "folderId": "073t7tm"
+    },
+    {
+      "id": "1hhsahq",
+      "text": "圧力：求め方　ちあめ（力の強さ、圧力、面積）",
+      "count": 2,
+      "folderId": "073t7tm"
+    },
+    {
+      "id": "du6qynt",
+      "text": "アルカリ性のものに酸性のものを入れた：この時、その混合物はアルカリ性のままだった：中和は起こっているか　起こっている",
+      "count": 1,
+      "folderId": "bhw2pf2"
+    },
+    {
+      "id": "uz8e916",
+      "text": "塩素は水に＿＿＿　溶けやすい",
+      "count": 1,
+      "folderId": "073t7tm"
+    },
+    {
+      "id": "ryrumrp",
+      "text": "水圧は＿＿＿になればなるほど強くなる！　深く（浮力は上の面と下の面の差なので沈めたらほぼ変わらないけど）",
+      "count": 1,
+      "folderId": "bhw2pf2"
+    },
+    {
+      "id": "zsl421q",
+      "text": "「しせつ」に入る　施設",
+      "count": 1,
+      "folderId": "nbfvyo3"
+    },
+    {
+      "id": "r1heqfo",
+      "text": "そんなこと百も「しょうち」だ　承知",
+      "count": 1,
+      "folderId": "nbfvyo3"
+    },
+    {
+      "id": "v6a547p",
+      "text": "『対義語』：革新　『対義語』：保守",
+      "count": 1,
+      "folderId": "nbfvyo3"
+    },
+    {
+      "id": "64p8xkb",
+      "text": "言い出せる　いいいだせる",
+      "count": 1,
+      "folderId": "9ycd3fx"
+    },
+    {
+      "id": "d31hs3q",
+      "text": "偲はゆ　しぬはゆ：しのはゆ",
+      "count": 1,
+      "folderId": "9ycd3fx"
+    },
+    {
+      "id": "pm5iky6",
+      "text": "書き下し文で消すの　矣（文になるのにつく：「」の）、乎（や）など",
+      "count": 1,
+      "folderId": "ta1kkgg"
+    },
+    {
+      "id": "oq5db37",
+      "text": "定期テストは授業内容暗記",
+      "count": 1,
+      "folderId": "m4ltwr2"
+    },
+    {
+      "id": "sqtk5lf",
+      "text": "符号",
+      "count": 2,
+      "folderId": "r0jhzgq"
+    },
+    {
+      "id": "35i1tfr",
+      "text": "三角形の二分の一",
+      "count": 1,
+      "folderId": "r0jhzgq"
+    },
+    {
+      "id": "w1sq9r8",
+      "text": "面積（や長さ）等が０であるものは「ある」と仮定しない！",
+      "count": 1,
+      "folderId": "uxzn3cx"
+    },
+    {
+      "id": "uzjrxfm",
+      "text": "問題読む",
+      "count": 2,
+      "folderId": "r0jhzgq",
+      "html": "問題読む",
+      "imageUrl": null
+    },
+    {
+      "id": "da8d0vu",
+      "text": "realized 〜だと理解した、察した、気づいた",
+      "count": 1,
+      "folderId": "wg18ihs"
+    },
+    {
+      "id": "dwuph2w",
+      "text": "widely 広く",
+      "count": 1,
+      "folderId": "wg18ihs"
+    },
+    {
+      "id": "wfwkq98",
+      "text": "around 〜のあちこちで（に）",
+      "count": 1,
+      "folderId": "wg18ihs"
+    },
+    {
+      "id": "pbyeqpu",
+      "text": "people:waiting:in:line 列に並んでいる人々",
+      "count": 1,
+      "folderId": "tm03wjn"
+    },
+    {
+      "id": "5fssl0m",
+      "text": "differentの後は基本的に複数形（ただ「a」が「different」前にあったら単数系）",
+      "count": 1,
+      "folderId": "avpkscl"
+    },
+    {
+      "id": "0wf7w2h",
+      "text": "differentの後は基本的に複数形（ただ「a」が「different」前にあったら単数系）",
+      "count": 1,
+      "folderId": "vetvkg2"
+    },
+    {
+      "id": "ml4ksp0",
+      "folderId": "wg18ihs",
+      "html": "rose バラ",
+      "text": "rose バラ",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "mrrb2tq",
+      "folderId": "tm03wjn",
+      "html": "guide:ー:around:〜　ーに〜を案内する",
+      "text": "guide:ー:around:〜　ーに〜を案内する",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "4g1fdxx",
+      "folderId": "tm03wjn",
+      "html": "in:time （時間などに）間に合って",
+      "text": "in:time （時間などに）間に合って",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "fpx71vn",
+      "folderId": "yyq0c1h",
+      "html": "三単現",
+      "text": "三単現",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "yfzum0a",
+      "folderId": "yyq0c1h",
+      "html": "時制の一致",
+      "text": "時制の一致",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "e273q08",
+      "folderId": "830ppvc",
+      "html": "どれが主語か、そしてどれが省いてもいけるのかをしっかり見る",
+      "text": "どれが主語か、そしてどれが省いてもいけるのかをしっかり見る",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "f5p7t6q",
+      "folderId": "t0pgp2f",
+      "html": "私には〜がいます　私は〜を持っています（兄弟などに使える）",
+      "text": "私には〜がいます　私は〜を持っています（兄弟などに使える）",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "xlchj8i",
+      "folderId": "830ppvc",
+      "html": "しっかり全部のものと対応させる",
+      "text": "しっかり全部のものと対応させる",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "9nazqj9",
+      "folderId": "wg18ihs",
+      "html": "western 西洋の、西の",
+      "text": "western 西洋の、西の",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "pgkn3ep",
+      "folderId": "p7p8bcl",
+      "html": "しっかり読んだってわかるように比較部分があるならどう違うのかをしっかりかく",
+      "text": "しっかり読んだってわかるように比較部分があるならどう違うのかをしっかりかく",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "izazrpw",
+      "folderId": "tm03wjn",
+      "html": "answer:to 〜に対する答え",
+      "text": "answer:to 〜に対する答え",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "j1yl21e",
+      "folderId": "4khh89w",
+      "html": "不定詞の用法しっかり対応させて覚える",
+      "text": "不定詞の用法しっかり対応させて覚える",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "da6hw0u",
+      "folderId": "wg18ihs",
+      "html": "others 不特定複数の他人",
+      "text": "others 不特定複数の他人",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "ii2dse3",
+      "folderId": "yyq0c1h",
+      "html": "問題読む",
+      "text": "問題読む",
+      "count": 2,
+      "imageUrl": null
+    },
+    {
+      "id": "jfneved",
+      "folderId": "q9au6l1",
+      "html": "get:into enter",
+      "text": "get:into enter",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "crvyskq",
+      "folderId": "bf9bc0d",
+      "html": "take:off（脱ぐ） put:on（着ける、履く）",
+      "text": "take:off（脱ぐ） put:on（着ける、履く）",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "8syppls",
+      "folderId": "tm03wjn",
+      "html": "way:of:living 生活洋式",
+      "text": "way:of:living 生活洋式",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "5t10kxt",
+      "folderId": "jlnj3f9",
+      "html": "notとかしっかり判断する",
+      "text": "notとかしっかり判断する",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "n604vbk",
+      "folderId": "0g6fua1",
+      "html": "内容に合うものを→前後3〜5行読む",
+      "text": "内容に合うものを→前後3〜5行読む",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "ekjchp6",
+      "folderId": "wg18ihs",
+      "html": "about「数」　約「数」",
+      "text": "about「数」　約「数」",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "x8qrwmu",
+      "folderId": "wg18ihs",
+      "html": "popular 人気の",
+      "text": "popular 人気の",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "qqjcwsx",
+      "folderId": "wg18ihs",
+      "html": "famous 有名な",
+      "text": "famous 有名な",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "dipawr3",
+      "folderId": "wg18ihs",
+      "html": "bigの比較級　bigger",
+      "text": "bigの比較級　bigger",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "t0apppb",
+      "folderId": "dkyovfz",
+      "html": "<div><span style=\"-webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%;\">日本の再生可能エネルギーは全体の<font color=\"#3b82f6\">約20％</font>くらい</span><br></div><div><span style=\"-webkit-text-size-adjust: 100%;\">のなかで<font color=\"#22c55e\">1位は太陽光　2位は水力</font></span></div>",
+      "text": "日本の再生可能エネルギーは全体の約20％くらい\nのなかで1位は太陽光　2位は水力",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "h63xbvn",
+      "folderId": "0cvtkl1",
+      "html": "菊の電照栽培<span style=\"-webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%;\">が最も盛んなとこ（日本）　渥美半島</span>",
+      "text": "菊の電照栽培が最も盛んなとこ（日本）　渥美半島",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "s3hkety",
+      "folderId": "0cvtkl1",
+      "html": "成田国際空港の位置　千葉（の目の部分らへん）",
+      "text": "成田国際空港の位置　千葉（の目の部分らへん）",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "b91h8as",
+      "folderId": "g16e1qe",
+      "html": "大航海時代、アメリカ大陸から伝えられた　じゃがいも、トマト",
+      "text": "大航海時代、アメリカ大陸から伝えられた　じゃがいも、トマト",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "3f3e6j7",
+      "folderId": "g16e1qe",
+      "html": "免罪符を発売した時くらい、ドイツの＿＿＿が「聖書だけが信仰の拠り所である」とといて＿＿＿をした　ルター、宗教改革",
+      "text": "免罪符を発売した時くらい、ドイツの＿＿＿が「聖書だけが信仰の拠り所である」とといて＿＿＿をした　ルター、宗教改革",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "4833qk6",
+      "folderId": "akwmrw9",
+      "html": "室町時代：勘合貿易　明が相手　主な人は幕府、守護大名、寺社　明の衰退、倭寇の暴動、室町幕府の弱体化より終了",
+      "text": "室町時代：勘合貿易　明が相手　主な人は幕府、守護大名、寺社　明の衰退、倭寇の暴動、室町幕府の弱体化より終了",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "sg7ju2s",
+      "folderId": "gpkyfgr",
+      "html": "江戸時代：朱印船貿易　東南アジア相手　豪商、西国大名、外国人　鎖国体制より終了",
+      "text": "江戸時代：朱印船貿易　東南アジア相手　豪商、西国大名、外国人　鎖国体制より終了",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "341sgjs",
+      "folderId": "9cq72cd",
+      "html": "1871年：えた、ひにんなどをなくした（＿＿＿）文？のこと：＿＿＿　身分解放、解放令",
+      "text": "1871年：えた、ひにんなどをなくした（＿＿＿）文？のこと：＿＿＿　身分解放、解放令",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "ehgp2ck",
+      "folderId": "7jngsy9",
+      "html": "①原因（性質・仕組み）＋結果をセットで",
+      "text": "①原因（性質・仕組み）＋結果をセットで",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "tr1m547",
+      "folderId": "7jngsy9",
+      "html": "②問題中の「指定された語」・「関連する語」を必ず使う",
+      "text": "②問題中の「指定された語」・「関連する語」を必ず使う",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "mf435il",
+      "folderId": "7jngsy9",
+      "html": "③「対照実験」・「変更条件」は『何を変えて何を揃えたか』をかく",
+      "text": "③「対照実験」・「変更条件」は『何を変えて何を揃えたか』をかく",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "pmxjrnz",
+      "folderId": "7jngsy9",
+      "html": "④文末を聞かれ方に合うように書く",
+      "text": "④文末を聞かれ方に合うように書く",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "visfvte",
+      "folderId": "073t7tm",
+      "html": "植物の実験、エタノールを入れる理由　葉の緑色を脱色するため",
+      "text": "植物の実験、エタノールを入れる理由　葉の緑色を脱色するため",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "0m1t96w",
+      "folderId": "073t7tm",
+      "html": "抵抗器を２つ並列に繋ぐ：抵抗が1番「大きくor小さく」なる　小さく",
+      "text": "抵抗器を２つ並列に繋ぐ：抵抗が1番「大きくor小さく」なる　小さく",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "d1guph4",
+      "folderId": "nbfvyo3",
+      "html": "「カイトウ」乱麻を断つような活躍　快刀",
+      "text": "「カイトウ」乱麻を断つような活躍　快刀",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "lj7qzwm",
+      "folderId": "nbfvyo3",
+      "html": "みんなの努力が「トロウ」に終わる　徒労",
+      "text": "みんなの努力が「トロウ」に終わる　徒労",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "7txgto9",
+      "folderId": "wcqza4q",
+      "html": "丸い(A)純系とシワ（a）の純系を合わせてできる遺伝子の組み合わせ　Aa",
+      "text": "丸い(A)純系とシワ（a）の純系を合わせてできる遺伝子の組み合わせ　Aa",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "39y1eo4",
+      "folderId": "wcqza4q",
+      "html": "理科の実験で親・子・孫は誰を対象にするかで変化するか　変化しない（同実験内でそれぞれの呼び方は名みたいなものになってる）",
+      "text": "理科の実験で親・子・孫は誰を対象にするかで変化するか　変化しない（同実験内でそれぞれの呼び方は名みたいなものになってる）",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "yiqixcx",
+      "folderId": "wcqza4q",
+      "html": "親をA、子をB、孫をCとする：孫の話をしている時に「親」と出てきたらそれは誰のことを指しているか　A",
+      "text": "親をA、子をB、孫をCとする：孫の話をしている時に「親」と出てきたらそれは誰のことを指しているか　A",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "8bp47pk",
+      "folderId": "ufexj0p",
+      "html": "化学反応式では＿＿＿の形で基本いるやつは＿＿＿（同じ）でかく！　分子",
+      "text": "化学反応式では＿＿＿の形で基本いるやつは＿＿＿（同じ）でかく！　分子",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "pezmr3q",
+      "folderId": "ympe4in",
+      "html": "計算は<span style=\"caret-color: rgb(59, 130, 246);\"><font color=\"#1f2937\">ていねい</font></span>に　焦りすぎない（落ち着いて）　しっかり見直し！",
+      "text": "計算はていねいに　焦りすぎない（落ち着いて）　しっかり見直し！",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "jb7j4u7",
+      "folderId": "0hx3rw2",
+      "html": "①代名詞の対象を見つける（なかったらそれは入れない）",
+      "text": "①代名詞の対象を見つける（なかったらそれは入れない）",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "js37kgi",
+      "folderId": "0hx3rw2",
+      "html": "つなぎ語・接続詞（その語の意味（逆説、例etc）にあっているか）",
+      "text": "つなぎ語・接続詞（その語の意味（逆説、例etc）にあっているか）",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "nbg2r7d",
+      "folderId": "0hx3rw2",
+      "html": "③無冠詞（a/an）「一度も出てきてない」から冠詞（the）への変化",
+      "text": "③無冠詞（a/an）「一度も出てきてない」から冠詞（the）への変化",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "xv74s29",
+      "folderId": "j6fi8et",
+      "html": "右ねじの法則：1；親指：2；その他の指の向き　1；電流の向き：2；磁界の向き",
+      "text": "右ねじの法則：1；親指：2；その他の指の向き　1；電流の向き：2；磁界の向き",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "7rztwfb",
+      "folderId": "j6fi8et",
+      "html": "Wh＝＿＿（＿＿×＿＿）×＿＿　W、A、V、h",
+      "text": "Wh＝＿＿（＿＿×＿＿）×＿＿　W、A、V、h",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "hffgx0w",
+      "folderId": "j6fi8et",
+      "html": "電力量（J）＝＿＿（＿＿×＿＿）×＿＿　W、A、V、s",
+      "text": "電力量（J）＝＿＿（＿＿×＿＿）×＿＿　W、A、V、s",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "lfar79y",
+      "folderId": "j6fi8et",
+      "html": "1Wh＝＿＿J 3600",
+      "text": "1Wh＝＿＿J 3600",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "19pduej",
+      "folderId": "qdi3z3u",
+      "html": "地表から0〜3m→地表より高い→＿＿＿　露頭",
+      "text": "地表から0〜3m→地表より高い→＿＿＿　露頭",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "d3svtvp",
+      "folderId": "55pi871",
+      "html": "see-sea:would-＿＿　wood",
+      "text": "see-sea:would-＿＿　wood",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "fbmsumx",
+      "folderId": "wg18ihs",
+      "html": "west 西",
+      "text": "west 西",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "keo37q7",
+      "folderId": "r0jhzgq",
+      "html": "四則演算",
+      "text": "四則演算",
+      "count": 4,
+      "imageUrl": null
+    },
+    {
+      "id": "mvyix41",
+      "folderId": "s02byqe",
+      "html": "〜を因数分解しなさい→<font color=\"#22c55e\">単項式</font>にする！（xとかを求めるんじゃない！）",
+      "text": "〜を因数分解しなさい→単項式にする！（xとかを求めるんじゃない！）",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "wwm4gnl",
+      "folderId": "uxzn3cx",
+      "html": "⚪︎は◻︎の何倍！とかは◻︎×△・・・ってしていって<font color=\"#22c55e\">（比とか使って）</font>何倍かを求める",
+      "text": "⚪︎は◻︎の何倍！とかは◻︎×△・・・ってしていって（比とか使って）何倍かを求める",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "ot474ay",
+      "folderId": "uxzn3cx",
+      "html": "対角線：多角形でとなりあっていない２つの頂点を結んだ直線のこと",
+      "text": "対角線：多角形でとなりあっていない２つの頂点を結んだ直線のこと",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "ntc9ai3",
+      "folderId": "r0jhzgq",
+      "html": "途中式ていねいに",
+      "text": "途中式ていねいに",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "32s60rj",
+      "folderId": "uxzn3cx",
+      "html": "<font color=\"#22c55e\">平行線だーいすき（作る！利用する！）</font>",
+      "text": "平行線だーいすき（作る！利用する！）",
+      "count": 2,
+      "imageUrl": null
+    },
+    {
+      "id": "zpd7nhe",
+      "folderId": "rvcv0a3",
+      "html": "未：1；＿＿＿：2；＿＿＿：「＿＿＿」　いまだ、〜ず、まだ〜ない",
+      "text": "未：1；＿＿＿：2；＿＿＿：「＿＿＿」　いまだ、〜ず、まだ〜ない",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "l7eplpy",
+      "folderId": "y3017tx",
+      "html": "返点を打つとき、置き字には返り点で着地しない",
+      "text": "返点を打つとき、置き字には返り点で着地しない",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "w256nlu",
+      "folderId": "0iyqili",
+      "html": "<font color=\"#22c55e\"><span style=\"caret-color: rgb(34, 197, 94);\">辺の長さを求めたりするとき（だいたい全部）は平面図形にして考える！！</span></font>",
+      "text": "辺の長さを求めたりするとき（だいたい全部）は平面図形にして考える！！",
+      "count": 2,
+      "imageUrl": null
+    },
+    {
+      "id": "wiz9ic7",
+      "folderId": "0iyqili",
+      "html": "平行な面もしっかり探して利用する！（しっかり高さとかを見つける！）",
+      "text": "平行な面もしっかり探して利用する！（しっかり高さとかを見つける！）",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "i97u8y6",
+      "folderId": "wg18ihs",
+      "html": "first:prize 一等賞、大賞",
+      "text": "first:prize 一等賞、大賞",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "m6nzcoc",
+      "folderId": "wg18ihs",
+      "html": "delivery 配達、配送、デリバリー",
+      "text": "delivery 配達、配送、デリバリー",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "09y4f9x",
+      "folderId": "wg18ihs",
+      "html": "polite 礼儀正しい、丁寧、丁重",
+      "text": "polite 礼儀正しい、丁寧、丁重",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "sjewc6y",
+      "folderId": "wg18ihs",
+      "html": "written:in:English 英語で書かれた",
+      "text": "written:in:English 英語で書かれた",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "8sqkr2x",
+      "folderId": "tm03wjn",
+      "html": "went:away 立ち去った",
+      "text": "went:away 立ち去った",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "q85scde",
+      "folderId": "g1pnuvu",
+      "html": "目的格の場合、「who」じゃなくて「whom」になる！（会話文とかだったらwhoで言われたり略されたりするけど）",
+      "text": "目的格の場合、「who」じゃなくて「whom」になる！（会話文とかだったらwhoで言われたり略されたりするけど）",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "76jhtp6",
+      "folderId": "wg18ihs",
+      "html": "wrote:in:English 英語で書いた",
+      "text": "wrote:in:English 英語で書いた",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "fnzz1tx",
+      "folderId": "tm03wjn",
+      "html": "be:afraid:of 〜を怖がっている",
+      "text": "be:afraid:of 〜を怖がっている",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "ko5nx7a",
+      "folderId": "yyq0c1h",
+      "html": "時制",
+      "text": "時制",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "j4qjjap",
+      "folderId": "bjjffg7",
+      "html": "関係代名詞　二文、関節疑問、分詞、不定詞など",
+      "text": "関係代名詞　二文、関節疑問、分詞、不定詞など",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "c7hgozw",
+      "folderId": "yyq0c1h",
+      "html": "誰視点かをしっかり確認",
+      "text": "誰視点かをしっかり確認",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "myesd50",
+      "folderId": "g1pnuvu",
+      "html": "間接疑問はそれの後に文を作る！",
+      "text": "間接疑問はそれの後に文を作る！",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "m1hytcd",
+      "folderId": "g1pnuvu",
+      "html": "関係代名詞は<font color=\"#22c55e\">「主格」か「目的格」</font>かをしっかり把握する！（特に先行詞が人の場合は　どっちかによって形が変わる）",
+      "text": "関係代名詞は「主格」か「目的格」かをしっかり把握する！（特に先行詞が人の場合は　どっちかによって形が変わる）",
+      "count": 2,
+      "imageUrl": null
+    },
+    {
+      "id": "vl49ph9",
+      "folderId": "tm03wjn",
+      "html": "too:~:for:me 私には〜すぎる",
+      "text": "too:~:for:me 私には〜すぎる",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "cpv3x50",
+      "folderId": "tm03wjn",
+      "html": "different:from:his 彼のとは違って",
+      "text": "different:from:his 彼のとは違って",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "qpuh4e1",
+      "folderId": "wg18ihs",
+      "html": "price 価格、代金、値段",
+      "text": "price 価格、代金、値段",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "mkn5nvh",
+      "folderId": "g1pnuvu",
+      "html": "関係代名詞は目的格なら略せるよー！",
+      "text": "関係代名詞は目的格なら略せるよー！",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "20e64sj",
+      "folderId": "wg18ihs",
+      "html": "wanted 〜したかった",
+      "text": "wanted 〜したかった",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "i4pt184",
+      "folderId": "wg18ihs",
+      "html": "been:to 訪れたことがある（とか）",
+      "text": "been:to 訪れたことがある（とか）",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "v3qxyrx",
+      "folderId": "tm03wjn",
+      "html": "Something:is:wrong:with~ 〜が故障している",
+      "text": "Something:is:wrong:with~ 〜が故障している",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "6o4ju2a",
+      "folderId": "9riugiz",
+      "html": "基本的には「one of」の後に「the」を置く！",
+      "text": "基本的には「one of」の後に「the」を置く！",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "0w6p2lv",
+      "folderId": "ju23bw4",
+      "html": "私は数学が一番好きです。　The:subject:which:I:like:(the:)best:is:math.",
+      "text": "私は数学が一番好きです。　The:subject:which:I:like:(the:)best:is:math.",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "5oka51w",
+      "folderId": "wg18ihs",
+      "html": "respect 尊敬している",
+      "text": "respect 尊敬している",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "95kthsi",
+      "folderId": "tm03wjn",
+      "html": "過去形のbe動詞+talking　話していた",
+      "text": "過去形のbe動詞+talking　話していた",
+      "count": 1,
+      "imageUrl": null
+    },
+    {
+      "id": "gz5c8a7",
+      "folderId": "tm03wjn",
+      "html": "stayed:at:~ 〜に泊まった",
+      "text": "stayed:at:~ 〜に泊まった",
+      "count": 1,
+      "imageUrl": null
     }
-
-    btns.showCreate.onclick = () => {
-        ui.lobby.classList.add('hidden');
-        ui.setup.classList.remove('hidden');
-    };
-    btns.cancelCreate.onclick = () => {
-        ui.setup.classList.add('hidden');
-        ui.lobby.classList.remove('hidden');
-    };
-
-    // --- ルーム作成・参加 ---
-    btns.modes.forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-            const minutes = parseInt(e.target.dataset.time);
-            await createRoom(minutes);
-        });
-    });
-
-    async function createRoom(minutes) {
-        isHost = true;
-        roomDuration = minutes;
-        // シンプルなID生成
-        myRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-        myColor = COLORS[0];
-
-        const roomRef = ref(db, `rooms/${myRoomId}`);
-        await set(roomRef, {
-            status: "waiting",
-            duration: minutes,
-            host: myUid,
-            createdAt: serverTimestamp()
-        });
-
-        // 自分が切断されたらルームごと消す (ホストの特権)
-        onDisconnect(roomRef).remove();
-
-        await joinRoomInternal(myRoomId, myColor);
-        showWaitingScreen();
-    }
-
-    async function joinRoom(roomId) {
-        isHost = false;
-        myRoomId = roomId;
-
-        // 色の決定と参加
-        const playersRef = ref(db, `rooms/${roomId}/players`);
-        const snapshot = await get(playersRef);
-        let pCount = 0;
-        if (snapshot.exists()) {
-            pCount = Object.keys(snapshot.val()).length;
-        }
-        myColor = COLORS[pCount % COLORS.length];
-
-        // 部屋のルール取得
-        const roomSnap = await get(ref(db, `rooms/${roomId}/duration`));
-        if(roomSnap.exists()) roomDuration = roomSnap.val();
-
-        await joinRoomInternal(roomId, myColor);
-        showWaitingScreen();
-    }
-
-    async function joinRoomInternal(roomId, color) {
-        const myPlayerRef = ref(db, `rooms/${roomId}/players/${myUid}`);
-        await set(myPlayerRef, {
-            id: myUid,
-            color: color,
-            joinedAt: serverTimestamp()
-        });
-        // 切断時に自分をリストから消す
-        if (!isHost) {
-            onDisconnect(myPlayerRef).remove();
-        }
-    }
-
-    // --- 待機画面 ---
-    function showWaitingScreen() {
-        ui.setup.classList.add('hidden');
-        ui.lobby.classList.add('hidden');
-        ui.waiting.classList.remove('hidden');
-        
-        document.getElementById('waiting-room-id').innerText = `Room: ${myRoomId}`;
-        document.getElementById('waiting-rule').innerText = `作戦時間: ${roomDuration > 0 ? roomDuration+'分' : '無制限'}`;
-
-        if (isHost) {
-            ui.btnStartRoom.classList.remove('hidden');
-            document.getElementById('waiting-status').innerText = "メンバーが揃ったら開始してください";
-        }
-
-        // ルームの監視（参加者更新とゲーム開始検知）
-        const roomRef = ref(db, `rooms/${myRoomId}`);
-        onValue(roomRef, (snap) => {
-            const data = snap.val();
-            if (!data) {
-                // ルームが解散された場合
-                if(!isPlaying) {
-                    alert("ルームが解散されました");
-                    location.reload();
-                }
-                return;
-            }
-
-            // プレイヤーリストの描画
-            ui.waitingPlayers.innerHTML = '';
-            if (data.players) {
-                Object.values(data.players).forEach((p, index) => {
-                    const isMe = p.id === myUid;
-                    const div = document.createElement('div');
-                    div.className = `flex items-center gap-3 p-2 rounded ${isMe ? 'bg-white/10 border border-gray-600' : 'bg-black/50'}`;
-                    div.innerHTML = `
-                        <div class="w-4 h-4 rounded-full shadow-[0_0_8px_currentColor]" style="background-color: ${p.color}; color: ${p.color}"></div>
-                        <span class="text-sm font-bold ${isMe ? 'text-white' : 'text-gray-300'}">Player ${index + 1} ${isMe ? '(YOU)' : ''}</span>
-                    `;
-                    ui.waitingPlayers.appendChild(div);
-                });
-            }
-
-            // ゲーム開始検知
-            if (data.status === "playing" && !isPlaying) {
-                startGame(data.duration);
-            }
-        });
-    }
-
-    ui.btnStartRoom.onclick = () => {
-        if (!isHost || !myRoomId) return;
-        update(ref(db, `rooms/${myRoomId}`), {
-            status: "playing",
-            startedAt: serverTimestamp()
-        });
-    };
-
-    // --- ゲーム本体 ---
-    function startGame(minutes) {
-        ui.waiting.classList.add('hidden');
-        ui.game.classList.remove('hidden');
-        
-        isPlaying = true;
-        
-        initMap(CENTER_LAT, CENTER_LNG);
-        listenToCells(); 
-        listenToOtherPlayers(); // 追加: 他人の位置を監視
-        startGPS();      
-        
-        if (minutes > 0) {
-            remainingSeconds = minutes * 60;
-            updateTimerDisplay();
-            timerInterval = setInterval(countdownTimer, 1000);
-        } else {
-            ui.timer.innerText = "無限";
-            ui.timer.classList.remove('timer-hurry');
-        }
-    }
-
-    function endGame() {
-        isPlaying = false;
-        clearInterval(timerInterval);
-        if (watchId) navigator.geolocation.clearWatch(watchId);
-        
-        ui.game.classList.add('hidden');
-        ui.result.classList.remove('hidden');
-        
-        const myScore = colorScores[myColor] || 0;
-        ui.finalScore.innerText = myScore;
-        
-        const sorted = Object.entries(colorScores).sort((a, b) => b[1] - a[1]);
-        let rank = sorted.findIndex(([color, _]) => color === myColor) + 1;
-        if (myScore === 0) rank = "-";
-        
-        ui.finalRank.innerText = `Rank: ${rank}位`;
-        if (rank === 1 && myScore > 0) ui.finalRank.innerText += " 🏆";
-
-        // 終了時に自分の切断フックを削除して退出処理
-        if(myRoomId && myUid) {
-            remove(ref(db, `rooms/${myRoomId}/players/${myUid}`));
-        }
-    }
-
-    function countdownTimer() {
-        if (!isPlaying) return;
-        remainingSeconds--;
-        updateTimerDisplay();
-        if (remainingSeconds <= 30) ui.timer.classList.add('timer-hurry');
-        if (remainingSeconds <= 0) endGame();
-    }
-
-    function updateTimerDisplay() {
-        const m = Math.floor(remainingSeconds / 60);
-        const s = remainingSeconds % 60;
-        ui.timer.innerText = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-    }
-
-    // --- 地図と位置情報 ---
-    function initMap(lat, lng) {
-        if (map) return;
-        const mapBounds = L.latLngBounds([PLAY_AREA.south, PLAY_AREA.west], [PLAY_AREA.north, PLAY_AREA.east]);
-        map = L.map('map', { 
-            zoomControl: false, doubleClickZoom: false,
-            maxBounds: mapBounds, maxBoundsViscosity: 1.0, minZoom: 15                
-        }).setView([lat, lng], 21);    
-
-        L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
-            attribution: "<a href='https://maps.gsi.go.jp/development/ichiran.html'>国土地理院</a>",
-            maxNativeZoom: 18, maxZoom: 23, bounds: mapBounds          
-        }).addTo(map);
-
-        const outerBounds = [[-90, -180], [90, -180], [90, 180], [-90, 180]];
-        const innerBounds = [
-            [PLAY_AREA.south, PLAY_AREA.west], [PLAY_AREA.north, PLAY_AREA.west],
-            [PLAY_AREA.north, PLAY_AREA.east], [PLAY_AREA.south, PLAY_AREA.east]
-        ];
-        L.polygon([outerBounds, innerBounds], { color: 'black', fillColor: '#111', fillOpacity: 1, weight: 0 }).addTo(map);
-
-        L.rectangle([[PLAY_AREA.south, PLAY_AREA.west], [PLAY_AREA.north, PLAY_AREA.east]], {
-            color: "#ff0055", weight: 3, fillOpacity: 0.0, dashArray: "10, 10"
-        }).addTo(map);
-
-        const playerIcon = L.divIcon({
-            className: 'custom-div-icon',
-            html: `<div class='player-marker' style='color: ${myColor}; background-color: ${myColor}'></div>`,
-            iconSize: [16, 16], iconAnchor: [8, 8]
-        });
-        playerMarker = L.marker([lat, lng], {icon: playerIcon, zIndexOffset: 1000}).addTo(map);
-
-        // キャリブレーション機能
-        map.on('click', (e) => {
-            if (isCalibrating && isPlaying && rawLat !== 0) {
-                latOffset = e.latlng.lat - rawLat;
-                lngOffset = e.latlng.lng - rawLng;
-                
-                isCalibrating = false;
-                ui.mapContainer.classList.remove('calibrating');
-                btns.calibrate.innerText = "🔧 ズレを直す";
-                btns.calibrate.classList.replace('bg-yellow-600', 'bg-yellow-900');
-                
-                updatePosition(rawLat, rawLng, 0, true); 
-                ui.status.innerHTML = `<span class="text-green-400 font-bold">✅ ズレを修正しました！</span>`;
-            }
-        });
-    }
-
-    function isInsidePlayArea(lat, lng) {
-        return lat >= PLAY_AREA.south && lat <= PLAY_AREA.north && lng >= PLAY_AREA.west && lng <= PLAY_AREA.east;
-    }
-
-    function updatePosition(plat, plng, accuracy, forceUpdate = false) {
-        if (!isPlaying || !playerMarker) return;
-
-        const finalLat = plat + latOffset;
-        const finalLng = plng + lngOffset;
-
-        playerMarker.setLatLng([finalLat, finalLng]);
-        
-        if (!isCalibrating) {
-            map.panTo([finalLat, finalLng], { animate: true, duration: 1.0 });
-        }
-
-        if (!isInsidePlayArea(finalLat, finalLng)) {
-            if(!isCalibrating) ui.status.innerHTML = `<span class="text-red-400">⚠️ エリア外 (和泉市内へ！)</span>`;
-            return;
-        }
-
-        if(!isCalibrating) {
-            ui.status.innerHTML = `<div class="w-3 h-3 rounded-full" style="background-color: ${myColor}"></div> <span class="text-white">スキャン中</span>`;
-        }
-
-        // Firebaseに自分の現在地を送信 (他プレイヤーへの共有用)
-        if (myRoomId && myUid) {
-            update(ref(db, `rooms/${myRoomId}/players/${myUid}`), { lat: finalLat, lng: finalLng });
-        }
-
-        // 陣取り処理
-        const cx = Math.floor(finalLng / CELL_SIZE);
-        const cy = Math.floor(finalLat / CELL_SIZE);
-        
-        for(let dy = -2; dy <= 2; dy++) {
-            for(let dx = -2; dx <= 2; dx++) {
-                const tx = cx + dx;
-                const ty = cy + dy;
-                const gridId = `${tx}_${ty}`;
-
-                if (gridData.has(gridId) && gridData.get(gridId).owner === myUid) continue;
-
-                // ルーム専用のcellsに書き込み
-                const cellRef = child(ref(db, `rooms/${myRoomId}/cells`), gridId);
-                set(cellRef, { owner: myUid, color: myColor, x: tx, y: ty, timestamp: serverTimestamp() }).catch(()=>{});
-            }
-        }
-    }
-
-    function startGPS() {
-        if (!navigator.geolocation) { 
-            ui.status.innerHTML = `<span class="text-red-500 font-bold">GPS非対応の端末です</span>`;
-            return; 
-        }
-
-        ui.status.innerHTML = `<div class="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></div> 🛰️ 衛星を捕捉中... 開けた場所へ！`;
-
-        watchId = navigator.geolocation.watchPosition(
-            (position) => {
-                rawLat = position.coords.latitude;
-                rawLng = position.coords.longitude;
-                const accuracy = position.coords.accuracy;
-
-                if (accuracy > 40 && !isCalibrating) {
-                    ui.status.innerHTML = `<span class="text-yellow-400 font-bold">⚠️ GPS精度低下中(誤差${Math.round(accuracy)}m)</span>`;
-                    return;
-                }
-                updatePosition(rawLat, rawLng, accuracy);
-            },
-            (error) => {
-                if(isCalibrating) return;
-                let errMsg = "GPSエラー";
-                if (error.code === 1) errMsg = "❌ 位置情報が許可されていません";
-                if (error.code === 2) errMsg = "📡 電波が弱いです。外へ出てください";
-                if (error.code === 3) errMsg = "⏱️ GPSタイムアウト";
-                ui.status.innerHTML = `<span class="text-red-400 font-bold">${errMsg}</span>`;
-            },
-            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-        );
-    }
-
-    // --- Firebase 同期処理 ---
-    function drawCell(gridId, x, y, color, owner) {
-        if (gridData.has(gridId)) {
-            const existing = gridData.get(gridId);
-            if (existing.owner === owner && existing.color === color) return;
-            if (map) map.removeLayer(existing.rect);
-            if (colorScores[existing.color]) colorScores[existing.color]--;
-        }
-
-        const bounds = [[y * CELL_SIZE, x * CELL_SIZE], [(y + 1) * CELL_SIZE, (x + 1) * CELL_SIZE]];
-        const rect = L.rectangle(bounds, { color: color, weight: 0, fillColor: color, fillOpacity: 0.85, className: 'grid-cell' });
-        if (map) rect.addTo(map);
-
-        gridData.set(gridId, { rect, owner, color });
-        colorScores[color] = (colorScores[color] || 0) + 1;
-        updateRanking();
-    }
-
-    function listenToCells() {
-        const cellsRef = ref(db, `rooms/${myRoomId}/cells`);
-        onChildAdded(cellsRef, (data) => {
-            const val = data.val();
-            drawCell(data.key, val.x, val.y, val.color, val.owner);
-        });
-        onChildChanged(cellsRef, (data) => {
-            const val = data.val();
-            drawCell(data.key, val.x, val.y, val.color, val.owner);
-        });
-    }
-
-    // 新規追加：他プレイヤーの位置の監視と描画
-    function listenToOtherPlayers() {
-        const playersRef = ref(db, `rooms/${myRoomId}/players`);
-        onValue(playersRef, (snap) => {
-            const players = snap.val();
-            if (!players || !map) return;
-
-            for (const uid in players) {
-                if (uid === myUid) continue; // 自分はスキップ
-                
-                const p = players[uid];
-                if (p.lat && p.lng) {
-                    if (otherPlayerMarkers[uid]) {
-                        // 既存マーカーの移動
-                        otherPlayerMarkers[uid].setLatLng([p.lat, p.lng]);
-                    } else {
-                        // 新規マーカーの作成
-                        const icon = L.divIcon({
-                            className: 'custom-div-icon',
-                            html: `<div class='other-player-marker' style='color: ${p.color}; background-color: ${p.color}'></div>`,
-                            iconSize: [14, 14], iconAnchor: [7, 7]
-                        });
-                        otherPlayerMarkers[uid] = L.marker([p.lat, p.lng], {icon: icon, zIndexOffset: 900}).addTo(map);
-                    }
-                }
-            }
-            
-            // 退出したプレイヤーのマーカーを消去
-            for (const uid in otherPlayerMarkers) {
-                if (!players[uid]) {
-                    map.removeLayer(otherPlayerMarkers[uid]);
-                    delete otherPlayerMarkers[uid];
-                }
-            }
-        });
-    }
-
-    function updateRanking() {
-        const sorted = Object.entries(colorScores).filter(([_, count]) => count > 0).sort((a, b) => b[1] - a[1]);
-        ui.ranking.innerHTML = '';
-        if(sorted.length === 0) return ui.ranking.innerHTML = '<div class="text-center text-sm text-gray-500">No Data</div>';
-
-        sorted.forEach(([color, count], index) => {
-            const isMe = color === myColor;
-            const item = document.createElement('div');
-            item.className = `flex justify-between items-center p-1 rounded ${isMe ? 'bg-white/10' : ''}`;
-            item.innerHTML = `
-                <div class="flex items-center gap-2">
-                    <span class="text-[10px] text-gray-400 w-2">${index + 1}</span>
-                    <div class="w-2.5 h-2.5 rounded-full" style="background-color: ${color}"></div>
-                    <span class="text-[10px] ${isMe ? 'text-white font-bold' : 'text-gray-400'}">${isMe ? 'YOU' : 'P'+(index+1)}</span>
-                </div>
-                <span class="font-bold text-xs ${isMe ? 'text-white' : 'text-gray-300'}">${count}<span class="text-[8px] font-normal ml-0.5">マス</span></span>
-            `;
-            ui.ranking.appendChild(item);
-        });
-    }
-
-    // --- ボタン処理 ---
-    btns.restart.addEventListener('click', () => location.reload());
-    
-    btns.recenter.addEventListener('click', () => {
-        if (!map || !playerMarker) return;
-        map.setView(playerMarker.getLatLng(), 21, { animate: true });
-    });
-
-    btns.calibrate.addEventListener('click', () => {
-        if (!isCalibrating) {
-            isCalibrating = true;
-            ui.mapContainer.classList.add('calibrating');
-            btns.calibrate.innerText = "❌ キャンセル";
-            btns.calibrate.classList.replace('bg-yellow-900', 'bg-yellow-600');
-            ui.status.innerHTML = `<span class="text-yellow-400 font-bold animate-pulse">👇 地図上の「本当の現在地」をタップしてください</span>`;
-        } else {
-            isCalibrating = false;
-            ui.mapContainer.classList.remove('calibrating');
-            btns.calibrate.innerText = "🔧 ズレを直す";
-            btns.calibrate.classList.replace('bg-yellow-600', 'bg-yellow-900');
-            ui.status.innerHTML = `<div class="w-3 h-3 rounded-full" style="background-color: ${myColor}"></div> <span class="text-white">スキャン再開</span>`;
-        }
-    });
-
-    // 起動
-    initSystem();
-
-</script>
-</body>
-</html>
-
-
-```
+  ]
+}
